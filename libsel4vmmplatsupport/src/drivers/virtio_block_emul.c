@@ -52,12 +52,12 @@ static void handle_virtio_blk_request(virtio_emul_t *emul)
 
     /* process what we can of the ring */
     uint16_t idx = emul->virtq.last_idx[emul->virtq.queue];
-    uint32_t buf_len = 0;
 
     uint64_t desc_addrs[NUM_REQUEST_ADDRS];
 
     while (idx != guest_idx) {
         uint16_t desc_head;
+        uint32_t buf_len = 0;
 
         /* read the head of the descriptor chain */
         desc_head = ring_avail(emul, vring, idx);
@@ -95,7 +95,10 @@ static void handle_virtio_blk_request(virtio_emul_t *emul)
             i++;
             len += this_len;
             desc_idx = desc.next;
-        } while (desc.flags & VRING_DESC_F_NEXT);
+        } while ((desc.flags & VRING_DESC_F_NEXT) && i < NUM_REQUEST_ADDRS);
+        if (desc.flags & VRING_DESC_F_NEXT) {
+            ZF_LOGE("virtio blk: descriptor chain longer than %d, ignoring the remainder", NUM_REQUEST_ADDRS);
+        }
         /* ship it */
         emul_tx_cookie_t *cookie = calloc(1, sizeof(*cookie));
         assert(cookie);
@@ -106,7 +109,14 @@ static void handle_virtio_blk_request(virtio_emul_t *emul)
          *  We could fix this, but not sure if it is necessary based on the
          *  FileSystem types that have been tested
          */
-        assert(buf_len <= MAX_DATA_BUF_SIZE);
+        if (buf_len > MAX_DATA_BUF_SIZE) {
+            ZF_LOGE("virtio blk: data buffer of %u bytes exceeds maximum %u, dropping request",
+                    buf_len, MAX_DATA_BUF_SIZE);
+            /* return the chain back to the guest without writing any data */
+            complete_virtio_blk_request(emul, cookie);
+            idx++;
+            continue;
+        }
 
         struct virtio_blk_outhdr hdr;
         memcpy(&hdr, vaddr, sizeof(struct virtio_blk_outhdr));
